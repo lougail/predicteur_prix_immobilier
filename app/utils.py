@@ -1,98 +1,77 @@
+import logging
 import pandas as pd
-import os
-from typing import Dict, Optional
 from pathlib import Path
+from typing import Dict, Any
 
-class DVFDataProcessor:
-    """Classe pour traiter les données DVF (Demandes de Valeurs Foncières)."""
+# Logger pour afficher les informations et erreurs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-    SURFACE_REELLE_BATI_COL = 'Surface reelle bati'
-    VALEUR_FONCIERE_COL = 'Valeur fonciere'
-    
-    def __init__(self, input_file: str, output_dir: str = "data"):
-        """
-        Initialise le processeur de données DVF.
-        
-        Args:
-            input_file (str): Chemin vers le fichier de données DVF
-            output_dir (str): Dossier de destination pour les fichiers traités
-        """
-        self.input_file = Path(input_file)
-        self.output_dir = Path(output_dir)
-        self.data: Optional[pd.DataFrame] = None
-        
-    def load_data(self) -> None:
-        """Charge les données DVF et effectue le prétraitement initial."""
-        self.data = pd.read_csv(self.input_file, sep='|', low_memory=False)
-        self.data['Commune'] = self.data['Commune'].str.upper()
-    
-    def filter_city_data(self, city: str) -> pd.DataFrame:
-        """
-        Filtre et traite les données pour une ville spécifique.
-        
-        Args:
-            city (str): Nom de la ville en majuscules
-            
-        Returns:
-            pd.DataFrame: Données filtrées et traitées pour la ville
-        """
-        if self.data is None:
-            raise ValueError("Les données n'ont pas été chargées. Appelez load_data() d'abord.")
-        df_city = self.data[
-            (self.data['Commune'] == city) &
-            (self.data['Nature mutation'] == 'Vente') &
-            (self.data[self.SURFACE_REELLE_BATI_COL].notna()) &
-            (self.data[self.VALEUR_FONCIERE_COL].notna())
-        ].copy()
-        
-        return self._process_city_data(df_city)
-    
-    def _process_city_data(self, df_city: pd.DataFrame) -> pd.DataFrame:
-        """
-        Traite les données d'une ville (méthode privée).
-        
-        Args:
-            df_city (pd.DataFrame): DataFrame de la ville à traiter
-            
-        Returns:
-            pd.DataFrame: DataFrame traité
-        """
-        for col in ['Valeur fonciere', self.SURFACE_REELLE_BATI_COL]:
-            df_city[col] = (df_city[col].astype(str)
-                           .str.replace(',', '.')
-                           .str.replace(' ', '')
-                           .astype(float))
-        # Calcul du prix au m²
-        df_city['prix_m2'] = df_city[self.VALEUR_FONCIERE_COL] / df_city[self.SURFACE_REELLE_BATI_COL]
-        
-        return df_city
-    
-    def process_and_save_all(self) -> None:
-        """Traite et sauvegarde les données pour toutes les villes configurées."""
-        if self.data is None:
-            self.load_data()
-            
-        # Création du dossier de sortie
-        self.output_dir.mkdir(exist_ok=True)
-        
-        # Configuration des villes
-        cities: Dict[str, str] = {
-            'LILLE': 'lille_2022.csv',
-            'BORDEAUX': 'bordeaux_2022.csv'
+# Fonction utilitaire pour charger et valider un dataset CSV
+def load_and_validate_dataset(file_path: Path) -> pd.DataFrame:
+    required_columns = [
+        'surface_bati', 'nombre_pieces', 'type_local',
+        'surface_terrain', 'nombre_lots', 'prix_m2'
+    ]
+    try:
+        df = pd.read_csv(file_path)
+        # Vérifie la présence des colonnes nécessaires
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Colonnes manquantes: {missing_cols}")
+        # Conversion des types
+        for col in ['surface_bati', 'nombre_pieces', 'surface_terrain', 'nombre_lots', 'prix_m2']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df
+    except Exception as e:
+        logger.error(f"Erreur lors du chargement du dataset: {str(e)}")
+        raise
+
+# Classe pour prétraiter les features avant la prédiction
+class FeatureProcessor:
+    def __init__(self):
+        self.required_features = ["surface_bati", "type_local", "nombre_lots"]
+        self.optional_features = ["nombre_pieces", "surface_terrain"]
+        self.max_values = {
+            "surface_bati": 10000, "nombre_pieces": 50,
+            "surface_terrain": 10000, "nombre_lots": 100
         }
-        
-        # Traitement pour chaque ville
-        for city, output_file in cities.items():
-            df_city = self.filter_city_data(city)
-            output_path = self.output_dir / output_file
-            df_city.to_csv(output_path, index=False)
-            print(f"Fichier exporté : {output_path}")
 
-def main():
-    """Point d'entrée principal pour le traitement des données."""
-    processor = DVFDataProcessor("data/ValeursFoncieres-2022.txt")
-    processor.process_and_save_all()
-    print("Traitement terminé.")
+    def validate_features(self, features: Dict[str, Any]) -> None:
+        # Vérifie la présence des features requises
+        missing = [f for f in self.required_features if f not in features]
+        if missing:
+            raise ValueError(f"Features requises manquantes : {', '.join(missing)}")
+        # Ajoute les valeurs par défaut pour les optionnelles
+        for feature in self.optional_features:
+            features.setdefault(feature, 0)
+        # Vérifie les types et valeurs
+        for field in ["surface_bati", "surface_terrain", "nombre_lots"]:
+            if not isinstance(features[field], (int, float)):
+                raise TypeError(f"Le champ {field} doit être un nombre")
+            if features.get(field, 0) < 0:
+                raise ValueError("Les valeurs ne peuvent pas être négatives")
+        if features["surface_bati"] == 0:
+            raise ValueError("La surface bâtie ne peut pas être nulle")
+        for field, max_value in self.max_values.items():
+            if field in features and features[field] > max_value:
+                raise ValueError(f"La valeur de {field} ne peut pas dépasser {max_value}")
 
-if __name__ == "__main__":
-    main()
+    def prepare_features_for_prediction(self, features: Dict[str, Any]) -> pd.DataFrame:
+        self.validate_features(features)
+        features.setdefault("surface_terrain", 0)
+        features.setdefault("nombre_pieces", 0)
+        # Retourne un DataFrame prêt pour le modèle
+        return pd.DataFrame([[
+            float(features["surface_bati"]),
+            float(features["surface_terrain"]),
+            float(features["nombre_lots"])
+        ]], columns=['Surface reelle bati', 'Surface terrain', 'Nombre de lots'])
+
+    def validate_type_local(self, type_local: str) -> None:
+        if type_local not in ["Appartement", "Maison"]:
+            raise ValueError("Type de local invalide. Valeurs acceptées : Appartement, Maison")
+
+    def validate_ville(self, ville: str) -> None:
+        if ville.lower() not in ["lille", "bordeaux"]:
+            raise ValueError("Ville invalide. Valeurs acceptées : lille, bordeaux")
