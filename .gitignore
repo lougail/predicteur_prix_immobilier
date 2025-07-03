@@ -198,3 +198,4 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignoredata/ValeursFoncieres-2022.txt
+data/ValeursFoncieres-2022.txt
